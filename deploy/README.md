@@ -1,120 +1,120 @@
-# Stack mit Docker Compose
+# Docker Compose stack
 
-`docker-compose.yml` startet drei Container:
+`docker-compose.yml` starts three containers:
 
-| Service | Image | Aufgabe |
+| Service | Image | Purpose |
 | --- | --- | --- |
-| `any-sync` | `ghcr.io/grishy/any-sync-bundle` | Sync-Netz (Coordinator, Consensus, Tree, File) in einem Container, mit eingebettetem MongoDB und Redis. Startet nur mit `--profile sync`. |
-| `anytype-cli` | `ghcr.io/anyproto/anytype-cli` | Headless-Client mit Bot-Account, stellt die HTTP-API auf `127.0.0.1:31012` bereit |
-| `anypub` | `ghcr.io/sker65/anypub`, gebaut von `.github/workflows/image.yml` | veröffentlicht getaggte Objekte nach `PUBLIC_DIR` |
+| `any-sync` | `ghcr.io/grishy/any-sync-bundle` | sync network (coordinator, consensus, tree, file) in one container, with embedded MongoDB and Redis. Starts only with `--profile sync`. |
+| `anytype-cli` | `ghcr.io/anyproto/anytype-cli` | headless client with the bot account, serves the HTTP API on `127.0.0.1:31012` |
+| `anypub` | `ghcr.io/sker65/anypub`, built by `.github/workflows/image.yml` | publishes tagged objects to `PUBLIC_DIR` |
 
-`any-sync-bundle` ist ein Community-Projekt, das die offiziellen any-sync-Knoten in ein Binary packt. Das offizielle Setup von Anytype ist [any-sync-dockercompose](https://github.com/anyproto/any-sync-dockercompose) mit rund zehn Containern.
+`any-sync-bundle` is a community project that packs the official any-sync nodes into one binary. The official Anytype setup is [any-sync-dockercompose](https://github.com/anyproto/any-sync-dockercompose) with about ten containers.
 
-## Bestehendes Sync-Netz
+nginx with TLS runs on the host and serves `PUBLIC_DIR`, see `nginx/`.
 
-Läuft any-sync bereits, darf der Service `any-sync` nicht starten: Er würde ein zweites, neues Netz mit eigenen Schlüsseln anlegen. Deshalb gehört er zum Profil `sync` und startet ohne `--profile sync` nicht.
+## Existing sync network
 
-anytype-cli braucht dann nur die `client-config.yml` des bestehenden Netzes. Sie in ein eigenes Verzeichnis kopieren und `SYNC_CONFIG_DIR` in `.env` darauf setzen:
+If any-sync is already running, the service `any-sync` must not start: it would create a second, new network with its own keys. That is why it belongs to the profile `sync` and does not start without `--profile sync`.
+
+anytype-cli then needs only the `client-config.yml` of the existing network. Copy it to a directory of its own and point `SYNC_CONFIG_DIR` in `.env` at it:
 
 ```sh
-mkdir -p sync && cp /pfad/zum/any-sync/data/client-config.yml sync/
+mkdir -p sync && cp /path/to/any-sync/data/client-config.yml sync/
 echo SYNC_CONFIG_DIR=./sync >> .env
 ```
 
-Das ganze Datenverzeichnis des Bundles einzubinden geht auch, gibt anytype-cli aber Lesezugriff auf `bundle-config.yml` mit den privaten Schlüsseln des Netzes. Die Kopie muss erneuert werden, wenn sich die externen Adressen des Netzes ändern.
+Mounting the whole data directory of the bundle also works, but gives anytype-cli read access to `bundle-config.yml`, which holds the private keys of the network. Renew the copy when the external addresses of the network change.
 
-anytype-cli erreicht den Server dann über die Adressen in `client-config.yml`, also über den öffentlichen Namen. Läuft der Sync-Server auf demselben Host und ist der Name von dort nicht erreichbar, hilft ein Eintrag unter `anytype-cli` in `docker-compose.yml`: `extra_hosts: ["sync.example.com:host-gateway"]`.
+anytype-cli reaches the server through the addresses in `client-config.yml`, that is, through the public name. If the sync server runs on the same host and the name is not reachable from there, add this under `anytype-cli` in `docker-compose.yml`: `extra_hosts: ["sync.example.com:host-gateway"]`.
 
-Vor einem Update des Bundles auf die Version aus `docker-compose.yml` dessen Datenverzeichnis nach einem sauberen Stopp sichern. Laut Bundle-README bleibt das Konfigurationsformat innerhalb von 1.x lesbar.
+Before updating the bundle to the version in `docker-compose.yml`, stop it cleanly and back up its data directory. According to the bundle README, the configuration format stays readable within 1.x.
 
-nginx mit TLS läuft auf dem Host und liefert `PUBLIC_DIR` aus, siehe `nginx/`.
+## First start
 
-## Erster Start
+Run all commands in this directory.
 
-Alle Befehle laufen in diesem Verzeichnis.
-
-1. Konfiguration anlegen:
+1. Create the configuration:
 
    ```sh
-   cp .env.example .env              # SYNC_HOST, PUB_BASE_URL, PUBLIC_DIR eintragen
+   cp .env.example .env              # fill in SYNC_HOST, PUB_BASE_URL, PUBLIC_DIR
    cp ../anypub.example.yaml anypub.yaml
    touch anytype_api_key
    ```
 
-   `SYNC_HOST` ist der Name, unter dem die Anytype-Apps den Server erreichen. any-sync liest den Wert nur beim ersten Start und schreibt ihn dann nach `data/any-sync/bundle-config.yml`.
+   `SYNC_HOST` is the name under which the Anytype apps reach the server. any-sync reads it only on its first start and then writes it to `data/any-sync/bundle-config.yml`.
 
-2. Client starten, mit eigenem Sync-Netz zusätzlich das Profil `sync`:
+2. Start the client; for a new sync network, add the profile `sync`:
 
    ```sh
-   docker compose up -d anytype-cli                       # bestehendes Netz
-   docker compose --profile sync up -d any-sync anytype-cli  # neues Netz
+   docker compose up -d anytype-cli                          # existing network
+   docker compose --profile sync up -d any-sync anytype-cli  # new network
    ```
 
-   Ein neues Netz erzeugt dabei `data/any-sync/client-config.yml`. Firewall: TCP 33010 und UDP 33020 müssen offen sein.
+   A new network writes `data/any-sync/client-config.yml`. Firewall: TCP 33010 and UDP 33020 must be open.
 
-3. Bot-Account im eigenen Netz anlegen:
+3. Create the bot account in your network:
 
    ```sh
    docker compose exec anytype-cli anytype auth create anypub-bot --network-config /sync/client-config.yml
    ```
 
-   Der Befehl gibt den Account-Key aus. Ihn sicher aufbewahren, er ist der einzige Zugang zum Bot. Im Container liegt er unter `data/anytype-config/`, beim Neustart meldet sich anytype-cli damit wieder an.
+   The command prints the account key. Keep it safe, it is the only way into the bot account. anytype-cli stores it under `data/anytype-config/` and logs in with it again after a restart.
 
-4. API-Key für anypub erzeugen und in die Secret-Datei schreiben:
+4. Create the API key for anypub and write it to the secret file:
 
    ```sh
    docker compose exec anytype-cli anytype auth apikey create anypub --all-spaces --read-write
    ```
 
-   Den Wert hinter `Key:` ohne Zeilenumbruch nach `anytype_api_key` schreiben. anypub läuft als uid 10001, gid 33 und muss die Datei lesen können, zum Beispiel mit `chgrp 33 anytype_api_key && chmod 640 anytype_api_key`.
+   Write the value after `Key:` to `anytype_api_key`, without a line break. anypub runs as uid 10001, gid 33 and must be able to read the file, for example after `chgrp 33 anytype_api_key && chmod 640 anytype_api_key`.
 
-5. Nur bei einem neuen Netz: die Anytype-Desktop-App damit verbinden, also `data/any-sync/client-config.yml` beim Login unter „Self-hosted“ importieren. Ein Vault im eigenen Netz ist getrennt von einem Vault im Anytype-Netz. Bestehende Inhalte müssen exportiert und importiert werden.
+5. For a new network only: connect the Anytype desktop app to it by importing `data/any-sync/client-config.yml` under "Self-hosted" at login. A vault in your own network is separate from a vault in the Anytype network. Existing content has to be exported and imported.
 
-6. In der App den Space freigeben, den Einladungslink mit der Rolle Editor erzeugen und den Bot beitreten lassen:
+6. In the app, share the space, create an invite link with the Editor role and let the bot join:
 
    ```sh
    docker compose exec anytype-cli anytype space join "<invite-link>"
    docker compose exec anytype-cli anytype space list
    ```
 
-   Ohne Editor-Rolle kann anypub die `Public URL` nicht zurückschreiben.
+   Without the Editor role, anypub cannot write back the `Public URL`.
 
-7. Die Space-ID aus `space list` als `ANYPUB_SPACES` in `.env` eintragen und anypub starten. Das Image kommt von ghcr.io; `--build` baut es stattdessen aus diesem Checkout.
+7. Put the space id from `space list` into `ANYPUB_SPACES` in `.env` and start anypub. The image comes from ghcr.io; `--build` builds it from this checkout instead.
 
    ```sh
    docker compose up -d anypub
    docker compose logs -f anypub
    ```
 
-   Im Log stehen `anypub started` und danach `stream live` pro Space. Hat im Space noch nie ein Objekt das Tag `publish` getragen, meldet anypub stattdessen `tag option does not exist yet`. Es prüft dann alle 30 s erneut. Sobald das erste Objekt getaggt ist, startet der Stream.
+   The log shows `anypub started` and then `stream live` per space. If no object in the space has ever carried the tag `publish`, anypub logs `tag option does not exist yet` instead. It then checks again every 30 s. The stream starts as soon as the first object is tagged.
 
-Prüfen: `docker compose exec anytype-cli wget -qO- 127.0.0.1:9464/readyz` gibt `ready` aus.
+Check: `docker compose exec anytype-cli wget -qO- 127.0.0.1:9464/readyz` prints `ready`.
 
-## Daten und Backup
+## Data and backup
 
-| Pfad | Inhalt | Sichern |
+| Path | Content | Back up |
 | --- | --- | --- |
-| `data/any-sync/` | Sync-Daten und `bundle-config.yml` mit den Schlüsseln des Netzes | ja, nach `docker compose stop any-sync` |
-| `data/anytype/`, `data/anytype-config/` | lokale Kopie des Bots und sein Account-Key | ja |
-| Volume `anypub-state` | `state.db`, lässt sich aus den `Public URL`-Werten wiederherstellen | optional |
-| `PUBLIC_DIR` | erzeugte Seiten, werden beim Start neu abgeglichen | nein |
+| `data/any-sync/` | sync data and `bundle-config.yml` with the keys of the network | yes, after `docker compose stop any-sync` |
+| `data/anytype/`, `data/anytype-config/` | the bot's local copy and its account key | yes |
+| volume `anypub-state` | `state.db`, recoverable from the `Public URL` values | optional |
+| `PUBLIC_DIR` | generated pages, reconciled again at startup | no |
 
-`.env`, `anypub.yaml`, `anytype_api_key` und `data/` enthalten Geheimnisse und gehören nicht in ein Repository.
+`.env`, `anypub.yaml`, `anytype_api_key`, `sync/` and `data/` contain secrets and do not belong in a repository. `deploy/.gitignore` excludes them.
 
-## Image von anypub
+## anypub image
 
-`.github/workflows/image.yml` testet und baut das Image für linux/amd64 und linux/arm64:
+`.github/workflows/image.yml` tests and builds the image for linux/amd64 and linux/arm64:
 
-| Auslöser | Tags in `ghcr.io/sker65/anypub` |
+| Trigger | Tags in `ghcr.io/sker65/anypub` |
 | --- | --- |
-| Push auf `main` | `main`, `sha-<commit>` |
-| Tag `v1.2.3` | `1.2.3`, `1.2`, `latest`, `sha-<commit>` |
-| Pull Request | nur Build, kein Push |
+| push to `main` | `main`, `sha-<commit>` |
+| tag `v1.2.3` | `1.2.3`, `1.2`, `latest`, `sha-<commit>` |
+| pull request | build only, no push |
 
-Ein neues Paket auf ghcr.io ist zunächst privat. Damit der Server es ohne Login ziehen kann, unter github.com/users/sker65/packages/container/anypub/settings die Sichtbarkeit auf „Public“ stellen. Sonst auf dem Server `docker login ghcr.io` mit einem Token mit `read:packages` ausführen.
+A new package on ghcr.io starts out private. So that the server can pull it without logging in, set its visibility to "Public" at github.com/users/sker65/packages/container/anypub/settings. Otherwise run `docker login ghcr.io` on the server with a token that has `read:packages`.
 
-`ANYPUB_VERSION` in `.env` wählt den Tag, Standard ist `main`.
+`ANYPUB_VERSION` in `.env` selects the tag; the default is `main`.
 
 ## Updates
 
-Die Image-Versionen von any-sync und anytype-cli sind fest eingetragen. Für ein Update die Tags in `docker-compose.yml` ändern und `docker compose pull && docker compose up -d` ausführen. Vor einem Update von any-sync `data/any-sync/` sichern.
+The image versions of any-sync and anytype-cli are pinned. To update, change the tags in `docker-compose.yml` and run `docker compose pull && docker compose up -d`. Back up `data/any-sync/` before updating any-sync.

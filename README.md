@@ -1,102 +1,104 @@
 # anypub
 
-anypub veröffentlicht Anytype-Objekte als statische Webseiten auf eigener Infrastruktur. Bekommt ein Objekt das Tag `publish`, rendert anypub es nach `public/p/<slug>/` und schreibt die öffentliche URL in die Property `Public URL` zurück. Wird das Tag entfernt, ist die Seite weg und die URL wieder leer.
+anypub publishes Anytype objects as static web pages on your own infrastructure. When an object gets the tag `publish`, anypub renders it to `public/p/<slug>/` and writes the public URL back into the property `Public URL`. When the tag is removed, the page is deleted and the URL is cleared.
 
-anypub läuft als zusätzlicher Client neben `anytype-cli` (headless anytype-heart mit Bot-Account). Es nutzt nur die lokale HTTP-API v2 von anytype-cli und erkennt Änderungen per Push über einen Server-Sent-Events-Stream, ohne Polling.
+anypub runs as an additional client next to `anytype-cli` (headless anytype-heart with a bot account). It uses only the local HTTP API v2 of anytype-cli. It detects changes by push through a Server-Sent Events stream, without polling.
 
-## Stand
+## Status
 
-Umgesetzt sind die Meilensteine M1 bis M4 der Spec ([Spec Anytype Tag-to-Publish Service.md](Spec%20Anytype%20Tag-to-Publish%20Service.md)):
+Milestones M1 to M4 of the spec are implemented ([Spec Anytype Tag-to-Publish Service.md](Spec%20Anytype%20Tag-to-Publish%20Service.md), in German):
 
-- Publish, Update und Unpublish über das Tag, pro Space opt-in
-- URL-Rückschrieb in `Public URL`, dazu `Published At` und `Publish Error`
-- Rendering aus dem AnyBlock-JSON mit Bildern, Dateien, Tabellen, Code-Highlighting, Light/Dark
-- Links und Mentions auf andere veröffentlichte Objekte werden umgeschrieben, auf nicht veröffentlichte Objekte zu reinem Text
-- Reconcile bei Start, Reconnect und optional stündlich
-- SQLite-State, aus den `Public URL`-Werten wiederherstellbar
-- `/healthz`, `/readyz`, `/metrics` (Prometheus), JSON-Logs mit Audit-Einträgen
-- Dockerfile, Compose-Datei und nginx-vhost
+- Publish, update and unpublish through the tag, opt-in per space
+- URL write-back to `Public URL`, plus `Published At` and `Publish Error`
+- Rendering from the AnyBlock JSON with images, files, tables, code highlighting, light and dark mode
+- Links and mentions to other published objects are rewritten; links to unpublished objects become plain text
+- Reconcile on start, on reconnect and optionally every hour
+- SQLite state, recoverable from the `Public URL` values
+- `/healthz`, `/readyz`, `/metrics` (Prometheus), JSON logs with audit entries
+- Dockerfile, Compose file and nginx vhost
 
-Nicht umgesetzt:
+Not implemented:
 
-- Zero-Knowledge-Modus (M5). `default_mode: zk` wird beim Start abgelehnt.
-- OpenTelemetry-Traces. Es gibt Prometheus-Metriken, aber keinen OTLP-Export.
+- Zero-knowledge mode (M5). `default_mode: zk` is rejected at startup.
+- OpenTelemetry traces. There are Prometheus metrics, but no OTLP export.
 
-Getestet ist anypub automatisch gegen einen Fake-Server und am 5. Nov. 2026 von Hand gegen den kompletten Stack aus `deploy/` (anytype-cli v0.5.2 mit heart v0.51.6, any-sync-bundle 1.7.0). Live geprüft: Publish, Rückschrieb ohne zweiten Render, Untag, Archivieren, Neustart ohne Render und eine noch nicht existierende Tag-Option. Nicht live geprüft sind Änderungen durch einen menschlichen Nutzer, weil dafür ein zweiter Account nötig ist, sowie Bilder und Dateien.
+anypub is tested automatically against a fake server. On 5 Nov 2026 it was also tested by hand against the complete stack from `deploy/` (anytype-cli v0.5.2 with heart v0.51.6, any-sync-bundle 1.7.0). Checked live: publish, write-back without a second render, untag, archive, restart without render, and a tag option that does not exist yet. Not checked live: edits by a human user, because that needs a second account, and images and files.
 
-## Abweichungen von der Spec
+## Deviations from the spec
 
-| Spec | Umsetzung | Grund |
+| Spec | Implementation | Reason |
 | --- | --- | --- |
-| gRPC (`ListenSessionEvents`, `ObjectSearchSubscribe`) mit App-Key | HTTP-API v2: `POST /v2/spaces/{id}/search/stream` (SSE) | Keys aus `anytype auth apikey create` haben Scope `JsonAPI`. Dieser Scope darf laut `core/auth.go` in heart keinen gRPC-Call ausführen. |
-| Markdown über den Objekt-Endpoint | AnyBlock-JSON (`GET …/objects/{id}?ids=full`), eigener Renderer | Der Markdown-Export ersetzt Datei- und Objekt-IDs durch Dateinamen. Asset-Download und Link-Rewrite wären damit unmöglich. |
-| Hash-Check gegen den Feedback-Loop | Events, deren `last_modified_by` der Bot ist, werden nicht gerendert. Der Hash-Check bleibt als zweite Sicherung. | Erfüllt das Akzeptanzkriterium „kein weiterer Render“ wörtlich. |
-| `rename` von `tmp/` nach `public/p/<slug>/` | `p/<slug>` ist ein Symlink auf `.v/<version>`, der Symlink wird per `rename` getauscht | Ein volles Verzeichnis lässt sich nicht atomar ersetzen. |
-| Collections | Nur das getaggte Objekt selbst wird veröffentlicht. Datenbank-Ansichten erscheinen als Platzhalter. | Entscheidung vom 5. Nov. 2026: erst einmal nur einzelne Objekte. |
+| gRPC (`ListenSessionEvents`, `ObjectSearchSubscribe`) with an app key | HTTP API v2: `POST /v2/spaces/{id}/search/stream` (SSE) | Keys from `anytype auth apikey create` have scope `JsonAPI`. According to `core/auth.go` in heart, this scope may not call any gRPC method. |
+| Markdown from the object endpoint | AnyBlock JSON (`GET …/objects/{id}?ids=full`), own renderer | The Markdown export replaces file and object ids with file names. Asset download and link rewriting would be impossible. |
+| Hash check against the feedback loop | Events whose `last_modified_by` is the bot are not rendered. The hash check stays as a second safeguard. | Meets the acceptance criterion "no further render" literally. |
+| `rename` from `tmp/` to `public/p/<slug>/` | `p/<slug>` is a symlink to `.v/<version>`; the symlink is swapped with `rename` | A non-empty directory cannot be replaced atomically. |
+| Collections | Only the tagged object itself is published. Database views appear as placeholders. | Decision of 5 Nov 2026: single objects only for now. |
 
-## Ablauf
+## How it works
 
-1. Beim Start löst anypub pro Space den Bot-Teilnehmer (`GET …/members/me`) und die Property-Keys auf. Fehlende Properties legt es an (`properties.create`).
-2. Pro Space öffnet es einen SSE-Stream mit dem Filter `tag IN ("publish")`. Der Stream liefert zuerst einen Snapshot aller getaggten Objekte, danach `object_added`, `object_updated` und `object_removed`.
-3. Der Snapshot dient als Reconcile: getaggte Objekte ohne aktuelle Seite werden gerendert, veröffentlichte Objekte ohne Tag depubliziert.
-4. Events laufen durch eine Queue, die pro Objekt serialisiert. `object_updated` wird 1,5 s entprellt.
-5. Bricht der Stream ab oder kommt drei Heartbeat-Intervalle lang nichts, verbindet anypub neu (1 s bis 30 s Backoff). Der neue Snapshot gleicht verlorene Events aus.
+1. At startup anypub resolves, per space, the bot participant (`GET …/members/me`) and the property keys. It creates missing properties (`properties.create`).
+2. Per space it opens an SSE stream with the filter `tag IN ("publish")`. The stream first sends a snapshot of all tagged objects, then `object_added`, `object_updated` and `object_removed`.
+3. The snapshot serves as the reconcile: tagged objects without a current page are rendered, and published objects without the tag are unpublished.
+4. Events go through a queue that serializes per object. `object_updated` is debounced by 1.5 s.
+5. If the stream breaks, or nothing arrives for three heartbeat intervals, anypub reconnects (backoff 1 s to 30 s). The new snapshot makes up for lost events.
 
-## Einrichtung
+## Setup
 
-Der einfachste Weg ist der komplette Stack mit Sync-Netz, anytype-cli und anypub in `deploy/docker-compose.yml`, beschrieben in [deploy/README.md](deploy/README.md).
+The simplest way is the complete stack with sync network, anytype-cli and anypub in `deploy/docker-compose.yml`, described in [deploy/README.md](deploy/README.md).
 
-Ohne Docker: Voraussetzung ist ein laufendes anytype-cli mit Bot-Account im eigenen any-sync-Netz (siehe `SELF-HOSTED.md` im anytype-cli-Repository).
+Without Docker, you need a running anytype-cli with a bot account in your own any-sync network (see `SELF-HOSTED.md` in the anytype-cli repository).
 
-1. Bot-Account anlegen: `anytype auth create anypub-bot --network-config network.yml`
-2. Den gewünschten Spaces per Invite beitreten, mit Rolle Editor: `anytype space join "<invite-link>"`
-3. API-Key erzeugen und in eine Datei schreiben: `anytype auth apikey create anypub`
-4. `anypub.example.yaml` kopieren, Space-IDs und `publish.base_url` eintragen.
-5. DNS-Eintrag für den Hostnamen anlegen. `deploy/nginx/pub.example.com.conf` und `deploy/nginx/anypub-headers.conf` anpassen und installieren.
-6. Starten, lokal mit `go run ./cmd/anypub -config anypub.yaml` oder per `deploy/docker-compose.yml`.
+1. Create the bot account: `anytype auth create anypub-bot --network-config network.yml`
+2. Join the spaces by invite, with the Editor role: `anytype space join "<invite-link>"`
+3. Create an API key and write it to a file: `anytype auth apikey create anypub --all-spaces --read-write`
+4. Copy `anypub.example.yaml` and fill in the space ids and `publish.base_url`.
+5. Create a DNS record for the host name. Adapt and install `deploy/nginx/pub.example.com.conf` and `deploy/nginx/anypub-headers.conf`.
+6. Start it, locally with `go run ./cmd/anypub -config anypub.yaml` or with `deploy/docker-compose.yml`.
 
-Prüfen: `curl 127.0.0.1:9464/readyz` antwortet `ready`, sobald alle Streams ihren Snapshot geliefert haben. Danach ein Objekt taggen; `Public URL` sollte nach wenigen Sekunden gesetzt sein.
+Check: `curl 127.0.0.1:9464/readyz` answers `ready` once all streams have delivered their snapshot. Then tag an object; `Public URL` should be set within a few seconds.
 
-Rechte im Ausgabeverzeichnis: Verzeichnisse `0750`, Dateien `0640`. nginx braucht Leserechte über die Gruppe, entweder über `publish.file_group` oder über die primäre Gruppe des Prozesses (in der Compose-Datei gid 33, `www-data`). Das Ausgabeverzeichnis auf dem Host muss für den anypub-Nutzer schreibbar sein.
+Permissions in the output directory: directories `0750`, files `0640`. nginx needs read access through the group, either through `publish.file_group` or through the primary group of the process (gid 33, `www-data`, in the Compose file). The output directory on the host must be writable for the anypub user.
 
-## Layout von `out_dir`
+## Layout of `out_dir`
 
 ```
-p/<slug>        Symlink auf ../.v/<version>, von nginx ausgeliefert
-.v/<version>/   index.html und a/<sha256>.<ext>, nicht direkt ausgeliefert
-tmp/            Staging auf demselben Dateisystem
+p/<slug>        symlink to ../.v/<version>, served by nginx
+.v/<version>/   index.html and a/<sha256>.<ext>, not served directly
+tmp/            staging on the same file system
 ```
 
-## Entwicklung
+## Development
 
 ```
 go test -race ./...
 ```
 
-`internal/service/e2e_test.go` startet den kompletten Dienst gegen den Fake-Server in `internal/service/fake_test.go` und prüft Publish, Update, Unpublish, den Feedback-Loop, Reconnect, Neustart und den Verlust von `state.db`.
+`internal/service/e2e_test.go` starts the complete service against the fake server in `internal/service/fake_test.go`. It checks publish, update, unpublish, the feedback loop, reconnect, restart, the loss of `state.db` and a missing tag option.
 
-| Paket | Aufgabe |
+| Package | Purpose |
 | --- | --- |
-| `internal/anyapi` | einziger Zugriff auf anytype-cli: HTTP-Client, SSE-Stream, Allowlist für Schreibzugriffe |
-| `internal/watcher` | ein Stream pro Space, Reconnect, Snapshot-Reconcile, Queue mit Debounce und Retry |
-| `internal/app` | Publish, Update, Unpublish, Assets, Rückschrieb |
-| `internal/render` | AnyBlock-JSON zu HTML, Inline-Markup-Parser |
-| `internal/publish` | Schreiben und Löschen unter `out_dir` |
-| `internal/store` | SQLite-State |
-| `internal/service` | Verdrahtung beim Start |
+| `internal/anyapi` | the only access to anytype-cli: HTTP client, SSE stream, allowlist for writes |
+| `internal/watcher` | one stream per space, reconnect, snapshot reconcile, queue with debounce and retry |
+| `internal/app` | publish, update, unpublish, assets, write-back |
+| `internal/render` | AnyBlock JSON to HTML, inline markup parser |
+| `internal/publish` | writing and deleting under `out_dir` |
+| `internal/store` | SQLite state |
+| `internal/service` | wiring at startup |
 
-## Verhalten der echten API
+The workflow `.github/workflows/image.yml` runs the tests and pushes the image `ghcr.io/sker65/anypub`, see [deploy/README.md](deploy/README.md#anypub-image).
 
-Gegen anytype-cli v0.5.2 geprüft:
+## Behaviour of the real API
 
-- Der Key der Tag-Property ist `tag`.
-- `last_modified_by` kommt als `participant-<identity>`. Der Rückschrieb von anypub wird daran erkannt und nicht erneut gerendert.
-- Archivieren entfernt das Objekt aus dem Stream (`object_removed`), anypub depubliziert. Das Leeren der Properties lehnt die API bei archivierten Objekten mit 403 ab. anypub loggt das und macht weiter. Weil die `Public URL` dadurch erhalten bleibt, sollte ein wiederhergestelltes Objekt seinen alten Slug zurückbekommen. Das ist nicht live geprüft.
-- `set_properties` nimmt Datumswerte als RFC-3339-String an.
-- Die API lehnt einen Filter ab, der eine noch nicht existierende Option nennt (400), und legt Optionen nur beim Schreiben eines Objekts an. anypub wertet das als „nichts getaggt“, meldet sich bereit und prüft alle `anytype.heartbeat` erneut.
-- Space-IDs gehen in voller Form (`bafy….xyz`, aus `anytype space list`) oder in der Kurzform aus `GET /v2/spaces`. Pro Space sollte immer dieselbe Form konfiguriert bleiben, weil der State sie speichert.
-- Einmal hing direkt nach dem Login der erste Stream-Aufruf ohne Antwort. Der Watchdog bricht jetzt auch das Warten auf die Response-Header nach drei Heartbeats ab.
+Checked against anytype-cli v0.5.2:
 
-Offen:
+- The key of the tag property is `tag`.
+- `last_modified_by` comes as `participant-<identity>`. anypub uses it to recognize its own write-back and does not render again.
+- Archiving removes the object from the stream (`object_removed`), and anypub unpublishes. The API refuses to clear the properties of an archived object with 403. anypub logs this and continues. Because the `Public URL` stays, a restored object should get its old slug back. This is not checked live.
+- `set_properties` accepts dates as RFC 3339 strings.
+- The API refuses a filter that names an option that does not exist yet (400), and it creates options only when an object is written. anypub treats this as "nothing tagged", reports ready and checks again every `anytype.heartbeat`.
+- Space ids work in full form (`bafy….xyz`, from `anytype space list`) or in the short form from `GET /v2/spaces`. Keep the same form configured for a space, because the state stores it.
+- Once, directly after login, the first stream request hung without an answer. The watchdog now also aborts the wait for the response headers after three heartbeats.
 
-- Wenn ein Objekt neu veröffentlicht wird, rendert anypub Seiten, die bereits darauf verlinken, erst bei deren nächster Änderung neu.
+Open:
+
+- When an object is newly published, anypub re-renders pages that already link to it only on their next change.
