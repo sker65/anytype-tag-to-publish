@@ -1,0 +1,42 @@
+# anypub configuration. Every scalar can be overridden by an env var:
+# ANYPUB_<SECTION>_<KEY>, e.g. ANYPUB_PUBLISH_BASE_URL. ANYPUB_SPACES takes
+# "id[:tag],id[:tag]".
+anytype:
+  api_addr: http://127.0.0.1:31012        # HTTP API of anytype-cli
+  api_key_file: /run/secrets/anytype_api_key  # from `anytype auth apikey create`
+  tag_property: tag                        # property key of the tag relation
+  heartbeat: 30s                           # SSE keepalive; 3 missed = reconnect
+
+spaces:            # opt-in; empty is an error
+  - id: bafyrei...   # full space id
+    tag: publish
+
+properties:        # display names; looked up per space, created when missing
+  public_url: Public URL
+  published_at: Published At   # "" disables
+  publish_error: Publish Error # "" disables
+  create: true
+
+publish:
+  base_url: https://pub.example.com
+  out_dir: /srv/anypub/public
+  default_mode: slug           # zk is planned (M5)
+  keep_slug_on_republish: false
+  noindex: true
+  file_group: ""               # group name or gid readable by nginx; "" = keep
+  debounce: 1500ms
+  workers: 4
+  max_asset_bytes: 26214400
+  safety_reconcile: 1h         # 0 = off
+  max_retries: 5
+
+state:
+  path: /var/lib/anypub/state.db
+
+hooks:
+  # runs via /bin/sh with ANYPUB_SLUG, ANYPUB_URL, ANYPUB_OBJECT_ID, ANYPUB_SPACE_ID
+  on_unpublish: ""
+
+observability:
+  listen_addr: 127.0.0.1:9464  # /healthz, /readyz, /metrics
+  log_level: info

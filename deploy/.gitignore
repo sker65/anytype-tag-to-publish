@@ -1,0 +1,6 @@
+.env
+anypub.yaml
+anytype_api_key
+data/
+public/
+sync/

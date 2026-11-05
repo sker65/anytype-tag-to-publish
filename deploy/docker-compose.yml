@@ -1,0 +1,80 @@
+# Complete stack: any-sync network, headless Anytype client, anypub.
+#
+#   any-sync     any-sync-bundle (community all-in-one build of the official
+#                any-sync nodes, embedded MongoDB and Redis)
+#   anytype-cli  official headless client, logged in as the bot account
+#   anypub       this service, inside anytype-cli's network namespace
+#
+# any-sync only starts with the profile "sync" (docker compose --profile sync
+# up -d). Leave it out when an any-sync network is already running and point
+# SYNC_CONFIG_DIR at the directory holding its client-config.yml.
+#
+# nginx (TLS, serving ./public) runs on the host, see deploy/nginx/.
+# First start and bot setup: deploy/README.md.
+name: anypub
+
+services:
+  any-sync:
+    image: ghcr.io/grishy/any-sync-bundle:1.7.0-2026-10-12
+    profiles: [sync]
+    restart: unless-stopped
+    environment:
+      # read on the first start only, then baked into data/any-sync/bundle-config.yml
+      ANY_SYNC_BUNDLE_INIT_EXTERNAL_ADDRS: ${SYNC_ADDRS:-${SYNC_HOST:?set SYNC_HOST in .env}}
+    ports:
+      - "33010:33010"      # DRPC (TCP), Anytype apps connect here
+      - "33020:33020/udp"  # QUIC
+    volumes:
+      - ./data/any-sync:/data
+    stop_grace_period: 120s
+    networks:
+      default:
+        # client-config.yml names SYNC_HOST; inside this network it resolves to
+        # this container, so anytype-cli does not depend on hairpin NAT
+        aliases:
+          - ${SYNC_HOST}
+
+  anytype-cli:
+    image: ghcr.io/anyproto/anytype-cli:v0.5.2
+    restart: unless-stopped
+    depends_on:
+      any-sync:
+        condition: service_started
+        required: false  # absent without the "sync" profile
+    volumes:
+      - ./data/anytype:/root/.anytype
+      - ./data/anytype-config:/root/.config/anytype
+      # client-config.yml of the network above; passed to `auth create --network-config`
+      - ${SYNC_CONFIG_DIR:-./data/any-sync}:/sync:ro
+    # no ports: the API listens on 127.0.0.1:31012 inside this namespace only
+
+  anypub:
+    # published by .github/workflows/image.yml; `docker compose up --build`
+    # builds it from this checkout instead
+    image: ghcr.io/sker65/anypub:${ANYPUB_VERSION:-main}
+    build: ..
+    restart: unless-stopped
+    # shares anytype-cli's network namespace: 127.0.0.1:31012 is the API,
+    # 127.0.0.1:9464 (health, metrics) stays internal
+    network_mode: service:anytype-cli
+    depends_on:
+      anytype-cli:
+        condition: service_healthy
+    # gid 33 = www-data on Debian/Ubuntu, so host nginx can read the output
+    user: "10001:33"
+    environment:
+      ANYPUB_PUBLISH_BASE_URL: ${PUB_BASE_URL:?set PUB_BASE_URL in .env}
+      ANYPUB_SPACES: ${ANYPUB_SPACES:?set ANYPUB_SPACES in .env}
+    secrets:
+      - anytype_api_key
+    volumes:
+      - ./anypub.yaml:/etc/anypub/anypub.yaml:ro
+      - anypub-state:/var/lib/anypub
+      - ${PUBLIC_DIR:-./public}:/srv/anypub/public
+
+secrets:
+  anytype_api_key:
+    file: ./anytype_api_key
+
+volumes:
+  anypub-state:
